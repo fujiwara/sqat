@@ -1,2 +1,2 @@
 # sqat
-sqat is message router like "at" command with Amazon SQS.
+sqat is a message router Lambda function like "at" command for Amazon SQS.
