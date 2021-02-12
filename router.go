@@ -13,9 +13,16 @@ import (
 )
 
 const (
-	AtTimestamp       = "AtTimestamp"
-	OriginalMessageId = "OriginalMessageId"
+	// AtTimestamp is a message attribute key represents an invocation timestamp.
+	AtTimestamp = "AtTimestamp"
+
+	// OriginalMessageID is a message attribute key represents an original message ID.
+	OriginalMessageID = "OriginalMessageID"
 )
+
+func init() {
+	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
+}
 
 // Router represents sqat application
 type Router struct {
@@ -38,7 +45,7 @@ func New(opt *Option) (*Router, error) {
 
 // Poll polls incoming queue and do route.
 func (r *Router) Poll(ctx context.Context) error {
-	log.Println("[debug] polling incoming queue")
+	log.Println("[info] polling incoming queue", r.option.IncomingQueueURL)
 	for {
 		select {
 		case <-ctx.Done():
@@ -55,79 +62,98 @@ func (r *Router) Poll(ctx context.Context) error {
 		}
 		for _, m := range res.Messages {
 			m := m
-			log.Printf("[debug] message %s", m.GoString())
-			attrs := make(map[string]string, len(m.MessageAttributes))
-			for key, value := range m.MessageAttributes {
-				if aws.StringValue(value.DataType) == "String" && value.StringValue != nil {
-					attrs[key] = *value.StringValue
-				}
-			}
-			msg := Message{
-				ReceiptHandle: *m.ReceiptHandle,
-				Body:          *m.Body,
-				Attributes:    attrs,
-				MessageId:     *m.MessageId,
-			}
-			if err := r.HandleMessage(ctx, msg); err != nil {
-				log.Println("[warn]", err)
+			if err := r.HandleMessage(ctx, m); err != nil {
+				log.Println("[error] failed to handle message.", err)
 			}
 		}
 	}
 }
 
-func (r *Router) HandleMessage(ctx context.Context, msg Message) error {
-	var invokedAt int64
-	if at := msg.Attributes[AtTimestamp]; at != "" {
-		ts, err := strconv.ParseInt(at, 10, 64)
-		if err != nil {
-			return errors.Wrapf(err, "failed to ParseInt message attribute 'invoked_at'")
-		}
-		invokedAt = ts
+// HandleMessage routes a message.
+func (r *Router) HandleMessage(ctx context.Context, msg *sqs.Message) error {
+	log.Println("[debug] received message", msg.GoString())
+	invokedAt, err := extractTimestamp(msg)
+	if err != nil {
+		log.Println("[warn]", err)
 	}
+
+	var originalMessageID string
+	if mid := msg.MessageAttributes[OriginalMessageID]; mid == nil {
+		log.Printf("[debug] set original message id to message attribute OriginalMessageId")
+		msg.MessageAttributes[OriginalMessageID] = &sqs.MessageAttributeValue{
+			DataType:    aws.String("String"),
+			StringValue: msg.MessageId,
+		}
+		originalMessageID = aws.StringValue(msg.MessageId)
+	} else {
+		log.Printf("[debug] keep original message id")
+		originalMessageID = aws.StringValue(mid.StringValue)
+	}
+	log.Printf(
+		"[info] handle message %s, original %s",
+		*msg.MessageId,
+		originalMessageID,
+	)
+
 	delay := invokedAt - time.Now().Unix()
-	attrs := make(map[string]*sqs.MessageAttributeValue, len(msg.Attributes))
-	for key, value := range msg.Attributes {
-		attrs[key] = &sqs.MessageAttributeValue{
-			DataType:    aws.String("String"),
-			StringValue: aws.String(value),
+	log.Printf("[info] delay %d sec", delay)
+	if delay > 0 {
+		log.Printf("[info] requeue: %s", originalMessageID)
+		// requeue to incoming queue
+		if _, err := r.sqs.SendMessageWithContext(ctx, &sqs.SendMessageInput{
+			QueueUrl:          aws.String(r.option.IncomingQueueURL),
+			MessageBody:       msg.Body,
+			MessageAttributes: msg.MessageAttributes,
+			DelaySeconds:      aws.Int64(delay),
+		}); err != nil {
+			return errors.Wrap(err, "failed to requeue message to incoming")
 		}
-	}
-	if attrs[OriginalMessageId] == nil {
-		attrs[OriginalMessageId] = &sqs.MessageAttributeValue{
-			DataType:    aws.String("String"),
-			StringValue: aws.String(msg.MessageId),
+	} else {
+		log.Printf("[info] move to outgoing: %s", originalMessageID)
+		// put to outgoing queue
+		if _, err := r.sqs.SendMessageWithContext(ctx, &sqs.SendMessageInput{
+			QueueUrl:          aws.String(r.option.OutgoingQueueURL),
+			MessageBody:       msg.Body,
+			MessageAttributes: msg.MessageAttributes,
+		}); err != nil {
+			return errors.Wrap(err, "failed to send message to outgoing")
 		}
 	}
 
-	log.Printf("[debug] delay %d sec", delay)
-	if delay <= 0 {
-		log.Println("[debug] outgoing", msg.MessageId)
-		// put to outgoing queue
-		if _, err := r.sqs.SendMessageWithContext(ctx, &sqs.SendMessageInput{
-			QueueUrl:          &r.option.OutgoingQueueURL,
-			MessageBody:       &msg.Body,
-			MessageAttributes: attrs,
-		}); err != nil {
-			return err
-		}
-	} else {
-		log.Printf("[debug] reverting %s", msg.MessageId)
-		// revert to incoming queue
-		if _, err := r.sqs.SendMessageWithContext(ctx, &sqs.SendMessageInput{
-			QueueUrl:          &r.option.IncomingQueueURL,
-			MessageBody:       &msg.Body,
-			DelaySeconds:      aws.Int64(delay),
-			MessageAttributes: attrs,
-		}); err != nil {
-			return err
-		}
-	}
-	log.Printf("[debug] deleting %s", msg.MessageId)
+	log.Printf("[info] delete from incoming: %s", originalMessageID)
 	if _, err := r.sqs.DeleteMessageWithContext(ctx, &sqs.DeleteMessageInput{
-		QueueUrl:      &r.option.IncomingQueueURL,
-		ReceiptHandle: &msg.ReceiptHandle,
+		QueueUrl:      aws.String(r.option.IncomingQueueURL),
+		ReceiptHandle: msg.ReceiptHandle,
 	}); err != nil {
-		return err
+		return errors.Wrap(err, "failed to delete message from incoming")
 	}
 	return nil
+}
+
+func extractTimestamp(msg *sqs.Message) (timestamp int64, err error) {
+	defer func() {
+		log.Println("[debug] extract timestamp", timestamp)
+	}()
+	at := msg.MessageAttributes[AtTimestamp]
+	if at == nil {
+		return 0, errors.New("no message attribute AtTimestamp")
+	}
+	switch dt := aws.StringValue(at.DataType); dt {
+	case "Number":
+		s := aws.StringValue(at.StringValue)
+		timestamp, err = strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			return 0, errors.Wrapf(err, "failed to Parse message attribute AtTimestamp as Integer %s", s)
+		}
+	case "String":
+		s := aws.StringValue(at.StringValue)
+		ts, err := time.Parse(time.RFC3339, s)
+		if err != nil {
+			return 0, errors.Wrapf(err, "failed to Parse message attribute AtTimestamp as RFC3339 %s", s)
+		}
+		timestamp = ts.Unix()
+	default:
+		return 0, errors.Errorf("invalid DataType of message attribute AtTimestamp: %s", dt)
+	}
+	return
 }

@@ -5,3 +5,6 @@ bootstrap: ../*.go ../go.* ../cmd/sqat/*.go
 
 deploy: bootstrap
 	lambroll deploy
+
+clean:
+	rm -f bootstrap

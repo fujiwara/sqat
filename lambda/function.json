@@ -2,13 +2,14 @@
   "FunctionName": "sqat",
   "Handler": "index",
   "MemorySize": 128,
-  "Role": "arn:aws:iam::{{ must_env `AWS_ACCOUNT_ID` }}:role/test_lambda_role",
+  "Role": "arn:aws:iam::314472643515:role/sqat-lamba-role",
   "Runtime": "provided.al2",
   "Environment": {
     "Variables": {
-      "SQAT_IN": "https://sqs.ap-northeast-1.amazonaws.com/{{ must_env `AWS_ACCOUNT_ID` }}/sqat-in",
-      "SQAT_OUT": "https://sqs.ap-northeast-1.amazonaws.com/{{ must_env `AWS_ACCOUNT_ID` }}/sqat-out"
+      "SQAT_LOG_LEVEL": "debug",
+      "SQAT_IN": "{{ must_env `SQAT_IN` }}",
+      "SQAT_OUT": "{{ must_env `SQAT_OUT` }}"
     }
   },
-  "Timeout": 60
+  "Timeout": 10
 }
