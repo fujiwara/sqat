@@ -8,3 +8,6 @@ test:
 
 clean:
 	rm -rf sqat dist/
+
+build-releases:
+        goreleaser build --snapshot --rm-dist
