@@ -2,10 +2,12 @@ package sqat
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"strconv"
 	"time"
 
+	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/sqs"
@@ -61,6 +63,8 @@ func (r *Router) Poll(ctx context.Context) error {
 		})
 		if err != nil {
 			log.Println("[warn]", err)
+			time.Sleep(time.Second)
+			continue
 		}
 		for _, m := range res.Messages {
 			m := m
@@ -127,7 +131,7 @@ func (r *Router) HandleMessage(ctx context.Context, msg *sqs.Message) error {
 		}
 	}
 
-	log.Printf("[info] delete from incoming: %s", originalMessageID)
+	log.Printf("[info] delete from incoming: %s", *msg.MessageId)
 	if _, err := r.sqs.DeleteMessageWithContext(ctx, &sqs.DeleteMessageInput{
 		QueueUrl:      aws.String(r.option.IncomingQueueURL),
 		ReceiptHandle: msg.ReceiptHandle,
@@ -163,4 +167,33 @@ func extractTimestamp(msg *sqs.Message) (timestamp int64, err error) {
 		return 0, errors.Errorf("invalid DataType of message attribute AtTimestamp: %s", dt)
 	}
 	return
+}
+
+// Transform transforms an events.SQSMessage to a *sqs.Message.
+func Transform(m events.SQSMessage) (*sqs.Message, error) {
+	b, err := json.Marshal(m)
+	if err != nil {
+		log.Println("[error]", err)
+		return nil, errors.Wrap(err, "failed to marshal JSON")
+	}
+	var msg sqs.Message
+	if err := json.Unmarshal(b, &msg); err != nil {
+		log.Println("[error]", err)
+		return nil, errors.Wrap(err, "failed to unmarshal JSON")
+	}
+	for key, attr := range msg.MessageAttributes {
+		if attr.BinaryListValues != nil {
+			if len(attr.BinaryListValues) > 0 {
+				log.Printf("[warn] purge BinaryListValues in message attribute %s. Message attribute list values in SendMessage operation are not supported.", key)
+			}
+			attr.BinaryListValues = nil
+		}
+		if attr.StringListValues != nil {
+			if len(attr.StringListValues) > 0 {
+				log.Printf("[warn] purge StringListValues in message attribute %s. Message attribute list values in SendMessage operation are not supported.", key)
+			}
+			attr.StringListValues = nil
+		}
+	}
+	return &msg, nil
 }
