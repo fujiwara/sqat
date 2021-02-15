@@ -18,6 +18,8 @@ const (
 
 	// OriginalMessageID is a message attribute key represents an original message ID.
 	OriginalMessageID = "OriginalMessageID"
+
+	sqsMaxDelaySeconds = 900
 )
 
 func init() {
@@ -96,8 +98,13 @@ func (r *Router) HandleMessage(ctx context.Context, msg *sqs.Message) error {
 	)
 
 	delay := invokedAt - time.Now().Unix()
-	log.Printf("[info] delay %d sec", delay)
 	if delay > 0 {
+		if delay > sqsMaxDelaySeconds {
+			log.Printf("[info] delay %d sec, truncate to %d sec", delay, sqsMaxDelaySeconds)
+			delay = sqsMaxDelaySeconds
+		} else {
+			log.Printf("[info] delay %d sec", delay)
+		}
 		log.Printf("[info] requeue: %s", originalMessageID)
 		// requeue to incoming queue
 		if _, err := r.sqs.SendMessageWithContext(ctx, &sqs.SendMessageInput{
